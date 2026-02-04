@@ -73,7 +73,8 @@ bun run publish my-game --build       # Export + build production frontend
 
 ## Ecosystem Constraints
 
-- Every game must call `start_game` and `end_game` on the Game Hub contract.
+- Every game must call `start_game` and `end_game` on the Game Hub contract:
+  Testnet: CB4VZAT2U3UC6XFK3N23SKRF2NDCMP3QHJYMCHHFMZO7MRQO6DQ2EMYG
 - Game Hub enforces exactly two players per session.
 - Keep randomness deterministic between simulation and submission.
 - Prefer temporary storage with a 30-day TTL for game state.
