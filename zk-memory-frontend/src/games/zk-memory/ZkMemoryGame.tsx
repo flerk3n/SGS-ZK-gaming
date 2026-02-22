@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { ZkMemoryService } from './zkMemoryService';
 import { useWallet } from '@/hooks/useWallet';
 import { ZK_MEMORY_CONTRACT } from '@/utils/constants';
@@ -71,6 +71,12 @@ export function ZkMemoryGame({
   
   const actionLock = useRef(false);
   const POINTS_DECIMALS = 7;
+
+  // Memoize the current turn check to prevent flickering
+  const isMyTurn = useMemo(() => {
+    if (!gameState || !userAddress) return false;
+    return gameState.current_turn === userAddress;
+  }, [gameState?.current_turn, userAddress]);
 
   useEffect(() => {
     setPlayer1Address(userAddress);
@@ -271,13 +277,13 @@ export function ZkMemoryGame({
     console.log('[FlipCard] Current game state:', {
       currentTurn: gameState.current_turn,
       userAddress,
-      isMyTurn: gameState.current_turn === userAddress,
+      isMyTurn,
       flipOne: gameState.flip_one,
       position
     });
     
-    // Check if it's player's turn
-    if (gameState.current_turn !== userAddress) {
+    // Check if it's player's turn (use memoized value)
+    if (!isMyTurn) {
       setError(`Not your turn! Current turn: ${gameState.current_turn.slice(0, 8)}...`);
       return;
     }
@@ -439,9 +445,9 @@ export function ZkMemoryGame({
     // Disable card if:
     // - Loading (transaction in progress)
     // - Already matched
-    // - Not player's turn
+    // - Not player's turn (use memoized value)
     // - This is the first flipped card (can't flip same card twice)
-    const isDisabled = loading || isMatched || gameState?.current_turn !== userAddress || isFlipped;
+    const isDisabled = loading || isMatched || !isMyTurn || isFlipped;
     
     return (
       <button
@@ -670,7 +676,7 @@ export function ZkMemoryGame({
             </div>
             <div className="mt-4">
               <p className="font-bold">
-                {gameState.current_turn === userAddress ? '🎮 Your Turn!' : '⏳ Opponent\'s Turn'}
+                {isMyTurn ? '🎮 Your Turn!' : '⏳ Opponent\'s Turn'}
               </p>
               <p className="text-sm">Pairs Found: {gameState.pairs_found} / 2</p>
               {gameState.flip_one !== undefined && gameState.flip_one !== null && (
