@@ -1,0 +1,6 @@
+[package]
+name = "card_reveal"
+type = "bin"
+authors = [""]
+
+[dependencies]

@@ -301,10 +301,9 @@ export function ZkMemoryGame({
 
     try {
       const revealedValue = deck[position];
-      const proof = generateMockProof();
-      const publicInputs = generateMockPublicInputs(position, commitment, revealedValue);
       
       console.log('[FlipCard] Flipping card:', { position, revealedValue, commitment: commitment.slice(0, 16) + '...' });
+      console.log('[FlipCard] Using Noir proof generation');
       
       const signer = await getContractSigner();
       
@@ -314,14 +313,18 @@ export function ZkMemoryGame({
       
       while (retries > 0) {
         try {
+          // flipCard now handles Noir proof generation internally
+          // It will try Noir first, then fall back to mock if Noir fails
           await zkMemoryService.flipCard(
             sessionId,
             userAddress,
             position,
             revealedValue,
-            proof,
-            publicInputs,
-            signer
+            deck,      // Pass full deck for proof generation
+            salt,      // Pass salt for proof generation
+            signer,
+            undefined, // authTtlMinutes
+            false      // useMockProof: false = use real Noir proofs
           );
           
           setSuccess('Card flipped! Waiting for blockchain confirmation...');

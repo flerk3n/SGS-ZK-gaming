@@ -1,0 +1,9 @@
+# Example inputs for generating a proof
+# Private inputs (known only to prover)
+deck = ["0", "1", "0", "1"]  # 2 pairs: two 0s and two 1s
+salt = "12345"
+
+# Public inputs (known to everyone)
+position = "1"
+revealed_value = "1"
+commitment = "0x0c5e1baeb51bb46b0a5f4e1c8f45c3d8e8c8e8c8e8c8e8c8e8c8e8c8e8c8e8c8"  # Will be computed

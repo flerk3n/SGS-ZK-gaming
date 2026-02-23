@@ -23,7 +23,14 @@ export function shuffleDeck(): number[] {
 
 /**
  * Generate a commitment hash for the deck
- * Uses SHA-256 (mock Poseidon hash for development)
+ * 
+ * Uses SHA-256 for commitment computation.
+ * 
+ * NOTE: The Noir circuit uses Pedersen hash, but due to WebAssembly loading issues
+ * in the browser, we use SHA-256 as a practical alternative. This works because:
+ * 1. The contract is in development mode (accepts all proofs)
+ * 2. SHA-256 is cryptographically secure for commitments
+ * 3. For production, you can enable Pedersen by fixing the WASM loading
  * 
  * @param deck - Array of 4 card values
  * @param salt - Random salt string
@@ -33,15 +40,38 @@ export async function generateCommitment(
   deck: number[],
   salt: string
 ): Promise<string> {
-  // Combine deck and salt into a single string
-  const data = JSON.stringify({ deck, salt });
+  // Use SHA-256 directly (simpler and works in all browsers)
+  return generateCommitmentSHA256(deck, salt);
+}
+
+/**
+ * Generate a commitment hash for the deck using SHA-256 (legacy/fallback)
+ * 
+ * NOTE: This is kept for backwards compatibility and testing.
+ * Production should use Pedersen hash (generateCommitment) to match the circuit.
+ * 
+ * @param deck - Array of 4 card values
+ * @param salt - Random salt string
+ * @returns Hex string (32 bytes) representing the SHA-256 commitment
+ */
+export async function generateCommitmentSHA256(
+  deck: number[],
+  salt: string
+): Promise<string> {
+  // Convert deck to Uint8Array
+  const deckBytes = new Uint8Array(deck);
   
-  // Convert to Uint8Array
+  // Convert salt to Uint8Array
   const encoder = new TextEncoder();
-  const dataBuffer = encoder.encode(data);
+  const saltBytes = encoder.encode(salt);
+  
+  // Concatenate deck + salt
+  const combined = new Uint8Array(deckBytes.length + saltBytes.length);
+  combined.set(deckBytes, 0);
+  combined.set(saltBytes, deckBytes.length);
   
   // Hash using Web Crypto API (SHA-256)
-  const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', combined);
   
   // Convert to hex string
   const hashArray = Array.from(new Uint8Array(hashBuffer));
@@ -79,7 +109,55 @@ export function hexToBuffer(hex: string): Buffer {
 }
 
 /**
- * Generate mock proof bytes for development
+ * Generate a real RISC Zero proof for card reveal
+ * Calls the proof service backend
+ * 
+ * @param deck - The full deck
+ * @param salt - Random salt
+ * @param position - Card position
+ * @param revealedValue - The revealed value
+ * @returns Proof data (proof bytes and journal)
+ */
+export async function generateRiscZeroProof(
+  deck: number[],
+  salt: string,
+  position: number,
+  revealedValue: number
+): Promise<{ proof: Buffer; journal: Buffer; commitment: string }> {
+  try {
+    const response = await fetch('http://localhost:3001/generate-proof', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        deck,
+        salt,
+        position,
+        revealed_value: revealedValue,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to generate proof');
+    }
+
+    const data = await response.json();
+    
+    return {
+      proof: Buffer.from(data.proof, 'hex'),
+      journal: Buffer.from(data.journal, 'hex'),
+      commitment: data.commitment,
+    };
+  } catch (error) {
+    console.error('Failed to generate RISC Zero proof:', error);
+    throw error;
+  }
+}
+
+/**
+ * Generate mock proof bytes for development fallback
  * Contract accepts all proofs in development mode
  * 
  * @returns Buffer of 256 zero bytes

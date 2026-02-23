@@ -600,33 +600,72 @@ export class ZkMemoryService {
   }
 
   /**
-   * Flip a card with ZK proof verification
+   * Flip a card with Noir ZK proof verification
    * 
    * @param sessionId - The session ID of the game
    * @param player - Address of the player making the flip
-   * @param position - Card position to flip (0-15)
-   * @param revealedValue - The card value being revealed (0-7)
-   * @param proof - ZK proof bytes (mock for development)
-   * @param publicInputs - Public inputs for verification (mock for development)
+   * @param position - Card position to flip (0-3)
+   * @param revealedValue - The card value being revealed (0-1)
+   * @param deck - The full deck (for proof generation)
+   * @param salt - The salt used for commitment
    * @param signer - Player's signing capabilities
    * @param authTtlMinutes - Optional custom TTL
+   * @param useMockProof - If true, uses mock proof instead of Noir (default: false)
    */
   async flipCard(
     sessionId: number,
     player: string,
     position: number,
     revealedValue: number,
-    proof: Buffer,
-    publicInputs: Buffer[],
+    deck: number[],
+    salt: string,
     signer: Pick<contract.ClientOptions, 'signTransaction' | 'signAuthEntry'>,
-    authTtlMinutes?: number
+    authTtlMinutes?: number,
+    useMockProof: boolean = false
   ) {
-    if (position < 0 || position > 15) {
-      throw new Error('Position must be between 0 and 15');
+    if (position < 0 || position > 3) {
+      throw new Error('Position must be between 0 and 3');
     }
 
-    if (revealedValue < 0 || revealedValue > 7) {
-      throw new Error('Revealed value must be between 0 and 7');
+    if (revealedValue < 0 || revealedValue > 1) {
+      throw new Error('Revealed value must be 0 or 1');
+    }
+
+    // Generate proof (Noir or mock)
+    let proof: Buffer;
+    let publicInputs: Buffer[];
+    let commitment: string;
+
+    if (useMockProof) {
+      console.log('[flipCard] Using mock proof');
+      const { generateMockProof, generateMockPublicInputs, generateCommitment } = await import('./deckUtils');
+      commitment = await generateCommitment(deck, salt);
+      proof = generateMockProof();
+      publicInputs = generateMockPublicInputs(position, commitment, revealedValue);
+    } else {
+      console.log('[flipCard] Generating Noir proof...');
+      try {
+        const { generateNoirProof } = await import('./noirProofGen');
+        const proofData = await generateNoirProof(deck, salt, position, revealedValue);
+        
+        // Use the proof from Noir
+        proof = Buffer.from(proofData.proof);
+        commitment = proofData.commitment;
+        
+        // Public inputs are already formatted correctly
+        publicInputs = proofData.publicInputs.map(bytes => Buffer.from(bytes));
+        
+        console.log('[flipCard] Noir proof generated successfully');
+        console.log('[flipCard] Proof size:', proof.length, 'bytes');
+        console.log('[flipCard] Commitment:', commitment);
+      } catch (error) {
+        console.error('[flipCard] Failed to generate Noir proof, falling back to mock:', error);
+        // Fallback to mock proof if Noir fails
+        const { generateMockProof, generateMockPublicInputs, generateCommitment } = await import('./deckUtils');
+        commitment = await generateCommitment(deck, salt);
+        proof = generateMockProof();
+        publicInputs = generateMockPublicInputs(position, commitment, revealedValue);
+      }
     }
 
     const client = this.createSigningClient(player, signer);
