@@ -103,15 +103,16 @@ export class ZkMemoryService {
   }
 
   /**
-   * STEP 1 (Player 1): Prepare a start game transaction and export signed auth entry
+   * STEP 1 (Player 1): Prepare a start game transaction and export signed auth entry with encrypted deck data
    * - Creates transaction with Player 2 as the transaction source
    * - Simulates to get auth entries
    * - Player 1 signs their auth entry
-   * - Returns ONLY Player 1's signed auth entry XDR (not full transaction)
+   * - Encrypts deck data and embeds it in the auth entry
+   * - Returns ONLY Player 1's signed auth entry XDR with embedded encrypted deck data
    *
    * Uses extended TTL (60 minutes) for multi-sig flow to allow time for both players to sign
    *
-   * Player 2 will later import this auth entry and rebuild the transaction
+   * Player 2 will later import this auth entry, extract and decrypt the deck data, and rebuild the transaction
    */
   async prepareStartGame(
     sessionId: number,
@@ -120,6 +121,7 @@ export class ZkMemoryService {
     player1Points: bigint,
     player2Points: bigint,
     deckCommitment: Buffer,
+    deckData: { deck: number[]; salt: string; commitment: string },
     player1Signer: Pick<contract.ClientOptions, 'signTransaction' | 'signAuthEntry'>,
     authTtlMinutes?: number
   ): Promise<string> {
@@ -228,25 +230,44 @@ export class ZkMemoryService {
 
     // authorizeEntry returns the fully reconstructed auth entry with the signature
     const signedAuthEntryXdr = signedAuthEntry.toXDR('base64');
-    console.log('[prepareStartGame] ✅ Successfully signed and exported Player 1 auth entry XDR (length:', signedAuthEntryXdr.length, ')');
-    return signedAuthEntryXdr;
+    
+    // Encrypt deck data and embed it in the auth entry
+    const { generateEncryptionKey, encryptDeckData } = await import('./encryption');
+    const encryptionKey = await generateEncryptionKey();
+    const encryptedDeck = await encryptDeckData(deckData, encryptionKey);
+    
+    // Create a combined payload: authEntry|encryptionKey|encryptedDeck
+    const combinedPayload = `${signedAuthEntryXdr}|${encryptionKey}|${encryptedDeck}`;
+    
+    console.log('[prepareStartGame] ✅ Successfully signed and exported Player 1 auth entry with encrypted deck data');
+    return combinedPayload;
   }
 
   /**
-   * Parse a signed auth entry to extract game parameters
+   * Parse a signed auth entry with embedded encrypted deck data
    *
    * Auth entries from require_auth_for_args only contain the args that player is authorizing:
    * - Player address (from credentials)
    * - Session ID (arg 0)
    * - Player's points (arg 1)
    */
-  parseAuthEntry(authEntryXdr: string): {
+  parseAuthEntry(combinedPayload: string): {
     sessionId: number;
     player1: string;
     player1Points: bigint;
     functionName: string;
+    encryptionKey: string;
+    encryptedDeck: string;
   } {
     try {
+      // Split the combined payload
+      const parts = combinedPayload.split('|');
+      if (parts.length !== 3) {
+        throw new Error('Invalid auth entry format. Expected: authEntry|encryptionKey|encryptedDeck');
+      }
+      
+      const [authEntryXdr, encryptionKey, encryptedDeck] = parts;
+      
       // Parse the auth entry from XDR
       const authEntry = xdr.SorobanAuthorizationEntry.fromXDR(authEntryXdr, 'base64');
 
@@ -306,6 +327,8 @@ export class ZkMemoryService {
         player1,
         player1Points,
         functionName,
+        encryptionKey,
+        encryptedDeck,
       };
     } catch (err: any) {
       console.error('[parseAuthEntry] Error parsing auth entry:', err);
@@ -314,8 +337,9 @@ export class ZkMemoryService {
   }
 
   /**
-   * STEP 2 (Player 2): Import Player 1's signed auth entry and rebuild transaction
+   * STEP 2 (Player 2): Import Player 1's signed auth entry with embedded encrypted deck data
    * - Parses Player 1's signed auth entry to extract game parameters
+   * - Decrypts the embedded deck data
    * - Validates that the current user is Player 2
    * - Rebuilds the transaction with Player 2 as source
    * - Injects Player 1's signed auth entry (replacing the stub)
@@ -324,31 +348,34 @@ export class ZkMemoryService {
    *
    * Uses extended TTL (60 minutes) for multi-sig flow to allow time for both players to sign
    *
-   * @param player1SignedAuthEntryXdr - The signed auth entry from Player 1
+   * @param combinedPayload - The combined auth entry with encrypted deck data from Player 1
    * @param player2Address - Player 2's address (the importer, must match auth entry)
    * @param player2Points - The points amount Player 2 wants to set (for validation/override)
-   * @param deckCommitment - The deck commitment (must match Player 1's commitment)
    * @param player2Signer - Player 2's signing capabilities
    * @param authTtlMinutes - Optional custom TTL (defaults to 60 minutes)
    */
   async importAndSignAuthEntry(
-    player1SignedAuthEntryXdr: string,
+    combinedPayload: string,
     player2Address: string,
     player2Points: bigint,
-    deckCommitment: Buffer,
     player2Signer: Pick<contract.ClientOptions, 'signTransaction' | 'signAuthEntry'>,
     authTtlMinutes?: number
-  ): Promise<string> {
-    console.log('[importAndSignAuthEntry] Parsing Player 1 signed auth entry...');
+  ): Promise<{ txXdr: string; deckData: { deck: number[]; salt: string; commitment: string } }> {
+    console.log('[importAndSignAuthEntry] Parsing Player 1 signed auth entry with encrypted deck data...');
 
-    // Parse the auth entry to extract game parameters
-    const gameParams = this.parseAuthEntry(player1SignedAuthEntryXdr);
+    // Parse the auth entry to extract game parameters and encrypted deck
+    const gameParams = this.parseAuthEntry(combinedPayload);
 
     console.log('[importAndSignAuthEntry] Parsed game parameters:', {
       sessionId: gameParams.sessionId,
       player1: gameParams.player1,
       player1Points: gameParams.player1Points.toString(),
     });
+    
+    // Decrypt the deck data
+    const { decryptDeckData } = await import('./encryption');
+    const deckData = await decryptDeckData(gameParams.encryptedDeck, gameParams.encryptionKey);
+    console.log('[importAndSignAuthEntry] Decrypted deck data successfully');
 
     console.log('[importAndSignAuthEntry] Rebuilding transaction with Player 2 params:', {
       player2: player2Address,
@@ -359,6 +386,12 @@ export class ZkMemoryService {
     if (player2Address === gameParams.player1) {
       throw new Error('Cannot play against yourself. Player 2 must be different from Player 1.');
     }
+    
+    // Extract just the auth entry XDR (first part before |)
+    const player1SignedAuthEntryXdr = combinedPayload.split('|')[0];
+    
+    // Convert deck commitment to Buffer
+    const deckCommitment = Buffer.from(deckData.commitment, 'hex');
 
     // Step 1: Build a new transaction with Player 2 as the source
     // Use parsed parameters from auth entry + provided Player 2 params
@@ -439,8 +472,11 @@ export class ZkMemoryService {
     }
 
     // Export full transaction XDR (with both auth entries signed)
-    console.log('[importAndSignAuthEntry] Returning full transaction XDR ready for submission');
-    return player2Tx.toXDR();
+    console.log('[importAndSignAuthEntry] Returning full transaction XDR and deck data');
+    return {
+      txXdr: player2Tx.toXDR(),
+      deckData
+    };
   }
 
   /**

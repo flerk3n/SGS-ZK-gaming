@@ -58,9 +58,7 @@ export function ZkMemoryGame({
   // Multi-sig state
   const [createMode, setCreateMode] = useState<'create' | 'import'>('create');
   const [exportedAuthEntryXDR, setExportedAuthEntryXDR] = useState<string | null>(null);
-  const [exportedDeckData, setExportedDeckData] = useState<string | null>(null);
   const [importAuthEntryXDR, setImportAuthEntryXDR] = useState('');
-  const [importDeckData, setImportDeckData] = useState('');
   const [importPlayer2Points, setImportPlayer2Points] = useState(DEFAULT_POINTS);
   
   // Player state
@@ -156,7 +154,7 @@ export function ZkMemoryGame({
       const signer = await getContractSigner();
       const commitmentBuffer = hexToBuffer(newCommitment);
 
-      // Prepare auth entry for Player 1
+      // Prepare auth entry for Player 1 with embedded encrypted deck data
       const authEntryXDR = await zkMemoryService.prepareStartGame(
         sessionId,
         player1Address,
@@ -164,16 +162,13 @@ export function ZkMemoryGame({
         p1Points,
         p2Points,
         commitmentBuffer,
+        { deck: newDeck, salt: newSalt, commitment: newCommitment },
         signer
       );
 
       setExportedAuthEntryXDR(authEntryXDR);
       
-      // Export deck data for Player 2 (in production, this would be encrypted)
-      const deckData = JSON.stringify({ deck: newDeck, salt: newSalt, commitment: newCommitment });
-      setExportedDeckData(deckData);
-      
-      setSuccess('Game prepared! Player 1 (you) will go first. Share both the auth entry AND deck data with Player 2.');
+      setSuccess('Game prepared! Player 1 (you) will go first. Share the auth entry with Player 2.');
     } catch (err: any) {
       setError(err.message || 'Failed to create game');
       console.error('Create game error:', err);
@@ -191,18 +186,8 @@ export function ZkMemoryGame({
     setSuccess(null);
 
     try {
-      // Parse the auth entry to get session info
+      // Parse the auth entry to get session info (deck data is embedded)
       const parsed = zkMemoryService.parseAuthEntry(importAuthEntryXDR);
-      
-      // Import the deck data from Player 1
-      if (!importDeckData) {
-        throw new Error('Deck data is required. Player 1 should share this with the auth entry.');
-      }
-      
-      const deckInfo = JSON.parse(importDeckData);
-      setDeck(deckInfo.deck);
-      setSalt(deckInfo.salt);
-      setCommitment(deckInfo.commitment);
       
       const p2Points = parsePoints(importPlayer2Points);
       if (!p2Points) {
@@ -210,20 +195,24 @@ export function ZkMemoryGame({
       }
 
       const signer = await getContractSigner();
-      const commitmentBuffer = hexToBuffer(deckInfo.commitment);
 
-      // Import and sign
-      const fullTxXDR = await zkMemoryService.importAndSignAuthEntry(
+      // Import and sign (this also decrypts the embedded deck data)
+      console.log('[ImportAndStart] Calling importAndSignAuthEntry...');
+      const { txXdr, deckData } = await zkMemoryService.importAndSignAuthEntry(
         importAuthEntryXDR,
         userAddress,
         p2Points,
-        commitmentBuffer,
         signer
       );
+      
+      // Update deck state from decrypted data
+      setDeck(deckData.deck);
+      setSalt(deckData.salt);
+      setCommitment(deckData.commitment);
 
       // Finalize and submit
       console.log('[ImportAndStart] Calling finalizeStartGame...');
-      await zkMemoryService.finalizeStartGame(fullTxXDR, userAddress, signer);
+      await zkMemoryService.finalizeStartGame(txXdr, userAddress, signer);
       console.log('[ImportAndStart] Game successfully created on blockchain!');
 
       setSessionId(parsed.sessionId);
@@ -430,9 +419,7 @@ export function ZkMemoryGame({
     setSuccess(null);
     setCreateMode('create');
     setExportedAuthEntryXDR(null);
-    setExportedDeckData(null);
     setImportAuthEntryXDR('');
-    setImportDeckData('');
     setImportPlayer2Points(DEFAULT_POINTS);
     setPlayer1Address(userAddress);
     setPlayer1Points(DEFAULT_POINTS);
@@ -565,15 +552,18 @@ export function ZkMemoryGame({
                 {loading ? 'Creating...' : 'Create Game'}
               </button>
 
-              {exportedAuthEntryXDR && exportedDeckData && (
+              {exportedAuthEntryXDR && (
                 <div className="mt-4 p-4 bg-gray-100 rounded space-y-4">
                   <div>
-                    <p className="font-bold mb-2">1. Auth Entry (share with Player 2):</p>
+                    <p className="font-bold mb-2">Auth Entry (share with Player 2):</p>
+                    <p className="text-sm text-gray-600 mb-2">
+                      This contains the transaction authorization AND encrypted deck data. Player 2 only needs this one item!
+                    </p>
                     <textarea
                       value={exportedAuthEntryXDR}
                       readOnly
                       className="w-full p-2 border rounded font-mono text-xs"
-                      rows={3}
+                      rows={4}
                     />
                     <button
                       onClick={() => {
@@ -586,27 +576,9 @@ export function ZkMemoryGame({
                     </button>
                   </div>
                   
-                  <div>
-                    <p className="font-bold mb-2">2. Deck Data (share with Player 2):</p>
-                    <textarea
-                      value={exportedDeckData}
-                      readOnly
-                      className="w-full p-2 border rounded font-mono text-xs"
-                      rows={2}
-                    />
-                    <button
-                      onClick={() => {
-                        navigator.clipboard.writeText(exportedDeckData);
-                        setSuccess('Deck data copied to clipboard!');
-                      }}
-                      className="mt-2 bg-green-500 text-white px-4 py-2 rounded"
-                    >
-                      Copy Deck Data
-                    </button>
-                  </div>
-                  
                   <p className="text-sm text-gray-600 mt-2">
-                    Note: In production, the deck would be encrypted before sharing. For development, we share it in plain text.
+                    ✅ Security: The deck data is encrypted using AES-256-GCM and embedded in the auth entry. 
+                    Only Player 2 can decrypt it with their wallet signature.
                   </p>
                 </div>
               )}
@@ -616,23 +588,16 @@ export function ZkMemoryGame({
           {createMode === 'import' && (
             <div className="space-y-4">
               <div>
-                <label className="block mb-2">1. Auth Entry XDR from Player 1</label>
+                <label className="block mb-2">Auth Entry from Player 1</label>
+                <p className="text-sm text-gray-600 mb-2">
+                  Paste the complete auth entry (contains transaction authorization and encrypted deck data)
+                </p>
                 <textarea
                   value={importAuthEntryXDR}
                   onChange={(e) => setImportAuthEntryXDR(e.target.value)}
                   className="w-full p-2 border rounded font-mono text-xs"
-                  rows={3}
-                  placeholder="Paste auth entry XDR here..."
-                />
-              </div>
-              <div>
-                <label className="block mb-2">2. Deck Data from Player 1</label>
-                <textarea
-                  value={importDeckData}
-                  onChange={(e) => setImportDeckData(e.target.value)}
-                  className="w-full p-2 border rounded font-mono text-xs"
-                  rows={2}
-                  placeholder="Paste deck data here..."
+                  rows={4}
+                  placeholder="Paste auth entry here..."
                 />
               </div>
               <div>
@@ -646,7 +611,7 @@ export function ZkMemoryGame({
               </div>
               <button
                 onClick={handleImportAndStart}
-                disabled={loading || !importAuthEntryXDR || !importDeckData}
+                disabled={loading || !importAuthEntryXDR}
                 className="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600 disabled:opacity-50"
               >
                 {loading ? 'Starting...' : 'Import and Start Game'}
